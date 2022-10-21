@@ -1,13 +1,97 @@
 name: ATM Check Queries Run
 
+env:
+  AZURE_STORAGE_URL: "https://atmcodeqldata.blob.core.windows.net"
+  # Relative path of the model CodeQL pack within a `github/codeql` checkout
+  MODEL_PACK_PATH: javascript/ql/experimental/adaptivethreatmodeling/model
+  MODEL_BULDING_PACK_PATH: javascript/ql/experimental/adaptivethreatmodeling/modelbuilding
+  UNZIPPED_DB_LOCATION: model_check_db
+
 # This check is required, therefore we must run it on all PRs, even if only Markdown has changed.
 on:
+  pull_request:
+    paths:
+      - "javascript/ql/experimental/adaptivethreatmodeling/modelbuilding/codeql-pack.lock.yml"
+      - "javascript/ql/experimental/adaptivethreatmodeling/modelbuilding/qlpack.yml"
+      - "javascript/experimental/adpativethreatmodeling/src/qlpack.yml"
+      - "javascript/experimental/adpativethreatmodeling/src/codeql-pack.lock.yml"
   workflow_dispatch:
 
 jobs:
-  hello-world:
+  run-atm-queries:
     runs-on: ubuntu-latest
 
     steps:
-      - name: foo
-        run: echo "Hello world"
+      - uses: actions/checkout@v3
+        with:
+          path: codeql-lib
+
+      - name: Install CodeQL CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh extensions install github/gh-codeql
+          gh codeql download
+
+      - name: Download model pack
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STORAGE_SAS: ${{ secrets.AZURE_BLOB_STORAGE_ATMCODEQLDATA_SAS }}
+        run: |
+          echo "::group::Download ATM model pack"
+          set -exu
+
+          # Get pack version and checksum
+          pack_version=$(yq '.dependencies.codeql/javascript-experimental-atm-model' ./codeql-lib/${MODEL_BULDING_PACK_PATH}/qlpack.yml )
+          model_checksum="${pack_version##*.}"
+          echo "Will use pack model ${pack_version} with model checksum ${model_checksum}."
+
+          # Download the model
+          tmp_dir=$(mktemp -d)
+          gh codeql pack download codeql/javascript-experimental-atm-model@${pack_version} -d "${tmp_dir}"
+
+          # Add it to the ATM query pack
+          resources_dir="./codeql-lib/${MODEL_PACK_PATH}/resources/"
+          mv "${tmp_dir}"/codeql/javascript-experimental-atm-model/${pack_version}/resources/* \
+            "${resources_dir}/"
+          ls -lR "${resources_dir}"
+
+          # Trust the model so that we can execute it in pytest
+          mkdir -p "$HOME/.config/codeql"
+          echo "--insecurely-execute-ml-model-checksums ${model_checksum}" >> "$HOME/.config/codeql/config"
+          echo "::endgroup::"
+
+      - name: Download model check DB from Azure
+        env:
+          STORAGE_SAS: ${{ secrets.AZURE_BLOB_STORAGE_ATMCODEQLDATA_SAS }}
+        run: |
+          echo "::group::Download ATM model pack"
+          containerName=atm
+          databasePathRoot=javascript-databases
+          databasePathAll=all_5893026b-e282-49f5-b96b-e76f6a971340
+          databasePath=${databasePathRoot}/${databasePathAll}
+          databaseName=AmanSultanBaig_SignIn-SignUp-System-with-Nodejs_967de9d.zip
+          
+          tmp_dir=$(mktemp -d)
+
+          echo ${databaseName}
+          echo ${AZURE_STORAGE_URL}
+          echo ${containerName}
+          echo ${databasePath}
+
+          azcopy10 cp ${AZURE_STORAGE_URL}/${containerName}/${databasePath}/${databaseName}${STORAGE_SAS} ${tmp_dir}/
+          ls ${tmp_dir}
+          unzip -q ${tmp_dir}/*.zip -d ${UNZIPPED_DB_LOCATION}
+          DB_NAME=$(ls -1 ${UNZIPPED_DB_LOCATION})
+          echo "INTEGRATION_TEST_DB=${UNZIPPED_DB_LOCATION}/${DB_NAME}" >> $GITHUB_ENV
+          echo "::endgroup::"
+
+      # - name: Run integration tests
+      #   run: |
+      #     # This call uses the following environment variables defined earlier:
+      #     #   - CODEQL_PATH
+      #     #   - QL_LIB_PATH
+      #     #   - TF_LIBRARY_PATH
+      #     #   - INTEGRATION_TEST_DB
+      #     source env/bin/activate
+      #     pytest -m integration --capture tee-sys --showlocals -vv
